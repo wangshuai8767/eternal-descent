@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>永恒下落 (Eternal Descent)</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #111;
+            font-family: 'Segoe UI', sans-serif;
+            touch-action: none; /* 禁止手机默认触摸行为 */
+            cursor: default;
+        }
+        canvas {
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* 让鼠标事件穿透到 Canvas */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            z-index: 10;
+        }
+        /* 分数显示 */
+        .score-display {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #fff;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.7);
+            z-index: 5;
+        }
+        /* 游戏结束/开始 面板 */
+        .panel {
+            background: rgba(0, 0, 0, 0.85);
+            padding: 40px;
+            border-radius: 15px;
+            border: 2px solid #0ff;
+            box-shadow: 0 0 20px #0ff;
+            pointer-events: auto; /* 允许点击按钮 */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            backdrop-filter: blur(5px);
+        }
+        h1 { 
+            color: #0ff; 
+            margin: 0 0 10px 0; 
+            text-transform: uppercase; 
+            letter-spacing: 2px; 
+            font-size: 32px;
+        }
+        p { color: #fff; font-size: 18px; margin: 10px 0; }
+        
+        /* 霓虹按钮 */
+        .btn-start {
+            margin-top: 20px;
+            padding: 15px 40px;
+            font-size: 20px;
+            background: transparent;
+            color: #0ff;
+            border: 2px solid #0ff;
+            border-radius: 30px;
+            cursor: pointer;
+            font-weight: bold;
+            text-transform: uppercase;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+            transition: all 0.2s;
+        }
+        .btn-start:hover {
+            background: #0ff;
+            color: #000;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.8);
+            transform: scale(1.05);
+        }
+        .btn-start:active { transform: scale(0.95); }
+
+        .hidden { display: none !important; }
+        
+        /* 操作提示 */
+        .tutorial {
+            margin-top: 15px;
+            color: rgba(255,255,255,0.6);
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="score-display">深度: <span id="scoreVal">0</span>m</div>
+
+    <div id="ui-layer">
+        <!-- 开始菜单 -->
+        <div id="startScreen" class="panel">
+            <h1>永恒下落</h1>
+            <p>准备好坠入深渊了吗？</p>
+            <button class="btn-start" onclick="startGame()">开始下落</button>
+            <div class="tutorial">🖱️ 左右移动鼠标 / 👆 左右滑动手指</div>
+        </div>
+
+        <!-- 结束菜单 (默认隐藏) -->
+        <div id="gameOverScreen" class="panel hidden">
+            <h1 style="color: #ff0055; border-color: #ff0055;">信号丢失</h1>
+            <p>最终深度: <span id="finalScore" style="font-size: 24px; font-weight: bold;">0</span>m</p>
+            <button class="btn-start" style="border-color: #ff0055; color: #ff0055;" onclick="startGame()" onmouseover="this.style.background='#ff0055'; this.style.color='white'" onmouseout="this.style.background='transparent'; this.style.color='#ff0055'">再次尝试</button>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('scoreVal');
+    const finalScoreEl = document.getElementById('finalScore');
+    const startScreen = document.getElementById('startScreen');
+    const gameOverScreen = document.getElementById('gameOverScreen');
+
+    // 游戏状态
+    let isPlaying = false;
+    let score = 0;
+    let speed = 5;
+    let frames = 0;
+    let animationId;
+
+    // 屏幕适配
+    let width, height;
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+        // 重新调整玩家位置
+        if(!isPlaying) {
+             player.x = width / 2;
+             player.targetX = width / 2;
+             drawIntro(); // 绘制静态背景
+        }
+    }
+    window.addEventListener('resize', resize);
+
+    // 玩家对象
+    const player = {
+        x: 0, y: 0,
+        radius: 12,
+        color: '#0ff',
+        targetX: 0,
+        trail: []
+    };
+
+    let obstacles = [];
+    let particles = [];
+
+    // 输入控制 (仅在游戏进行时生效)
+    function handleInput(x) {
+        if (isPlaying) {
+            player.targetX = x;
+        }
+    }
+
+    window.addEventListener('mousemove', e => handleInput(e.clientX));
+    window.addEventListener('touchmove', e => {
+        e.preventDefault();
+        handleInput(e.touches[0].clientX);
+    }, {passive: false});
+    window.addEventListener('touchstart', e => {
+        if(isPlaying) handleInput(e.touches[0].clientX);
+    });
+
+    // 开始游戏逻辑
+    function startGame() {
+        // 重置数据
+        isPlaying = true;
+        score = 0;
+        speed = 5;
+        frames = 0;
+        obstacles = [];
+        player.trail = [];
+        
+        // 隐藏UI
+        startScreen.classList.add('hidden');
+        gameOverScreen.classList.add('hidden');
+        
+        // 初始化位置
+        player.x = width / 2;
+        player.targetX = width / 2; // 关键：重置目标位置，防止开局瞬移
+        player.y = height * 0.2;
+
+        // 隐藏鼠标指针 (沉浸感)
+        document.body.style.cursor = 'none';
+
+        // 启动循环
+        if (animationId) cancelAnimationFrame(animationId);
+        loop();
+    }
+
+    // 游戏结束
+    function gameOver() {
+        isPlaying = false;
+        document.body.style.cursor = 'default'; // 恢复鼠标
+        finalScoreEl.innerText = Math.floor(score);
+        gameOverScreen.classList.remove('hidden');
+    }
+
+    // 生成障碍物
+    function spawnObstacle() {
+        const type = Math.random() > 0.5 ? 'rect' : 'gap';
+        const obsY = height + 50; 
+        
+        if (type === 'rect') {
+            const w = Math.random() * (width * 0.4) + 60;
+            const x = Math.random() * (width - w);
+            obstacles.push({ x, y: obsY, w, h: 40 }); // 增加一点厚度
+        } else {
+            const gapSize = 110; 
+            const gapX = Math.random() * (width - gapSize);
+            obstacles.push({ x: 0, y: obsY, w: gapX, h: 40 });
+            obstacles.push({ x: gapX + gapSize, y: obsY, w: width - (gapX + gapSize), h: 40 });
+        }
+    }
+
+    function updateParticles() {
+        if (frames % 2 === 0) {
+            particles.push({
+                x: Math.random() * width,
+                y: height + 20,
+                speed: Math.random() * 10 + 10,
+                length: Math.random() * 30 + 10
+            });
+        }
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.y -= p.speed * (speed / 5);
+            if (p.y < -50) particles.splice(i, 1);
+        }
+    }
+
+    // 静态背景 (未开始时显示)
+    function drawIntro() {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, width, height);
+        // 简单的网格背景
+        ctx.strokeStyle = '#222';
+        ctx.lineWidth = 1;
+        for(let i=0; i<width; i+=50) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,height); ctx.stroke(); }
+        for(let i=0; i<height; i+=50) { ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(width,i); ctx.stroke(); }
+    }
+
+    // 主循环
+    function loop() {
+        if (!isPlaying) return;
+
+        ctx.clearRect(0, 0, width, height);
+
+        // 1. 背景粒子
+        updateParticles();
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+        particles.forEach(p => ctx.fillRect(p.x, p.y, 2, p.length));
+
+        // 2. 逻辑更新
+        frames++;
+        score += 0.1;
+        if (frames % 600 === 0) speed += 0.5;
+        scoreEl.innerText = Math.floor(score);
+
+        // 玩家移动 (平滑)
+        player.x += (player.targetX - player.x) * 0.15;
+        // 边界
+        if (player.x < player.radius) player.x = player.radius;
+        if (player.x > width - player.radius) player.x = width - player.radius;
+
+        // 拖尾
+        player.trail.push({x: player.x, y: player.y});
+        if (player.trail.length > 12) player.trail.shift();
+
+        // 生成障碍
+        let spawnRate = Math.max(25, 60 - Math.floor(speed * 2));
+        if (frames % spawnRate === 0) spawnObstacle();
+
+        // 3. 障碍物处理
+        ctx.fillStyle = '#ff0055';
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#ff0055';
+        
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+            let obs = obstacles[i];
+            obs.y -= speed;
+
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+
+            // 碰撞检测
+            // 简单的 AABB 碰撞优化 (先检测Y轴范围，减少计算)
+            if (player.y + player.radius > obs.y && player.y - player.radius < obs.y + obs.h) {
+                // 再检测X轴
+                if (player.x + player.radius > obs.x && player.x - player.radius < obs.x + obs.w) {
+                   gameOver();
+                }
+            }
+
+            if (obs.y < -50) obstacles.splice(i, 1);
+        }
+        ctx.shadowBlur = 0;
+
+        // 4. 绘制玩家
+        for (let i = 0; i < player.trail.length; i++) {
+            let opacity = i / player.trail.length;
+            ctx.beginPath();
+            ctx.arc(player.trail[i].x, player.trail[i].y, player.radius * (0.6 + opacity*0.4), 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(0, 255, 255, ${opacity * 0.4})`;
+            ctx.fill();
+        }
+        
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+        ctx.fillStyle = player.color;
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = player.color;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // 边缘发光线
+        ctx.strokeStyle = '#222';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(0,0,width,height);
+
+        animationId = requestAnimationFrame(loop);
+    }
+
+    // 初始化
+    resize();
+    
+    // 如果鼠标位置已知，初始化targetX，避免开始时跳跃
+    window.addEventListener('mousemove', (e) => {
+        if(!isPlaying) player.targetX = e.clientX; 
+    }, {once:true});
+
+</script>
+</body>
+</html>
